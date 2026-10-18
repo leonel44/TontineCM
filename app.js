@@ -30,6 +30,19 @@
     date.setDate(date.getDate() + offset);
     return date.toISOString().slice(0, 10);
   };
+  const addFrequency = (value, frequency, count = 1) => {
+    const date = new Date(`${value}T12:00:00`);
+    if (frequency === "Chaque semaine" || frequency === "Toutes les 2 semaines") {
+      date.setDate(date.getDate() + (frequency === "Chaque semaine" ? 7 : 14) * count);
+    } else {
+      const day = date.getDate();
+      date.setDate(1);
+      date.setMonth(date.getMonth() + count);
+      const lastDay = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+      date.setDate(Math.min(day, lastDay));
+    }
+    return date.toISOString().slice(0, 10);
+  };
   const initials = (name) => name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
   const formatDate = (value, options = { day: "numeric", month: "short" }) =>
     new Intl.DateTimeFormat("fr-FR", options).format(new Date(`${value}T12:00:00`));
@@ -129,6 +142,9 @@
     authMode: "login",
     search: "",
     groupFilter: "all",
+    analyticsGroup: "all",
+    memberSearch: "",
+    orderDraft: [],
     theme: loadTheme(),
     preferences: loadPreferences(),
     toastTimer: null,
@@ -267,6 +283,20 @@
     return group.cycle > group.totalCycles;
   }
 
+  function getRotationOrder(group) {
+    const members = group.members || [];
+    const existing = Array.isArray(group.order) ? group.order.filter((member) => members.includes(member)) : [];
+    const unique = [...new Set(existing)];
+    const missing = members.filter((member) => !unique.includes(member));
+    const order = [...unique, ...missing];
+    const nextIndex = order.indexOf(group.nextMember);
+    return nextIndex > 0 ? [...order.slice(nextIndex), ...order.slice(0, nextIndex)] : order;
+  }
+
+  function groupHistory(group) {
+    return group.history || [];
+  }
+
   function statusForDate(value) {
     const days = Math.ceil((new Date(`${value}T12:00:00`) - new Date(`${dateIn(0)}T12:00:00`)) / 86400000);
     return days < 0 ? ["En retard", "late"] : days < 3 ? ["À venir", "pending"] : ["Planifiée", ""];
@@ -378,6 +408,11 @@
     const history = group.history.slice(0, 6).map((item) => `<div class="history-item"><span class="history-mark">${icon("check")}</span><div><strong>${escapeHtml(item.member)}</strong><small>${escapeHtml(item.note || "Cotisation")} · ${formatDate(item.date, { day: "numeric", month: "long" })}</small></div><div class="history-value">+ ${money(item.amount)}<small style="display:block">Confirmée</small></div></div>`).join("");
     return `<button class="back-button" data-nav="tontines">${icon("back")} Retour à mes tontines</button>
       <div class="detail-header">${groupIcon(group)}<div><h1>${escapeHtml(group.name)}</h1><p>${escapeHtml(group.kind)} · ${group.members.length} membres · Créée le ${formatDate(dateIn(-70))}</p></div><div class="detail-actions"><button class="button button-secondary" data-action="copy-invite">Inviter</button><button class="button button-primary" data-action="contribute">${icon("plus")} Enregistrer une cotisation</button></div></div>
+      <div class="detail-shortcuts" aria-label="Outils du groupe">
+        <button class="shortcut-card" data-action="open-members">${icon("users")}<span><strong>Membres</strong><small>Gérer et inviter</small></span>${icon("arrow")}</button>
+        <button class="shortcut-card" data-action="open-cycles">${icon("calendar")}<span><strong>Tours</strong><small>Ordre de passage</small></span>${icon("arrow")}</button>
+        <button class="shortcut-card" data-action="open-analytics">${icon("trend")}<span><strong>Statistiques</strong><small>Suivi des cotisations</small></span>${icon("arrow")}</button>
+      </div>
       <div class="stats-grid">
         <article class="card stat-card"><div class="stat-top"><span>Cotisation par membre</span><span class="stat-icon">${icon("wallet")}</span></div><p class="stat-value">${money(group.contribution)}</p><p class="stat-foot">À chaque tour</p></article>
         <article class="card stat-card"><div class="stat-top"><span>Cagnotte du tour</span><span class="stat-icon">${icon("trend")}</span></div><p class="stat-value">${money(group.contribution * group.members.length)}</p><p class="stat-foot">${group.members.length} contributions réunies</p></article>
@@ -389,6 +424,80 @@
         <div><section class="card panel"><div class="panel-heading"><h2>Avancement du tour</h2><span class="status">${progress(group)} %</span></div><div class="cycle-callout"><span class="stat-icon">${icon("calendar")}</span><div><strong>Tour ${group.cycle} sur ${group.totalCycles}</strong><small>Prochain tour : ${formatDate(group.nextDate, { day: "numeric", month: "long" })}</small></div></div><div class="progress"><span style="width:${progress(group)}%"></span></div><div class="card-footer"><span>${group.paid} cotisations reçues</span><strong>${money(group.contribution * group.paid)} / ${money(group.contribution * group.members.length)}</strong></div></section>
         <section class="card panel section-gap"><div class="panel-heading"><h2>Activité récente</h2><button class="text-link" data-action="show-history">Tout voir ${icon("arrow")}</button></div><div class="history-list">${history || `<div class="empty-state">Aucune cotisation enregistrée.</div>`}</div></section></div>
       </div>`;
+  }
+
+  function membersPage() {
+    const group = selectedGroup();
+    if (!group) return tontinesPage();
+    const search = state.memberSearch.toLowerCase();
+    const members = group.members.map((name, index) => ({ name, index })).filter((member) => member.name.toLowerCase().includes(search));
+    const paidNames = new Set(groupHistory(group).filter((entry) => entry.cycle === group.cycle).map((entry) => entry.member));
+    const order = getRotationOrder(group);
+    return `${heading(`Groupe · ${escapeHtml(group.name)}`, "Membres et invitations", "Ajoutez des participants et suivez leur activité dans le groupe.", `<button class="button button-secondary" data-action="back-to-group">${icon("back")} Retour au groupe</button>`)}
+      <div class="member-summary">
+        <article class="card stat-card"><div class="stat-top"><span>Membres inscrits</span><span class="stat-icon">${icon("users")}</span></div><p class="stat-value">${group.members.length}</p><p class="stat-foot">maximum : 50 membres</p></article>
+        <article class="card stat-card"><div class="stat-top"><span>Cotisations reçues</span><span class="stat-icon">${icon("check")}</span></div><p class="stat-value">${paidNames.size} / ${group.members.length}</p><p class="stat-foot">Tour ${group.cycle}</p></article>
+        <article class="card stat-card"><div class="stat-top"><span>Prochain bénéficiaire</span><span class="stat-icon">${icon("calendar")}</span></div><p class="stat-value member-next">${escapeHtml(group.nextMember)}</p><p class="stat-foot">Le ${formatDate(group.nextDate, { day: "numeric", month: "long" })}</p></article>
+      </div>
+      <div class="members-layout">
+        <section class="card panel"><div class="panel-heading"><div><h2>Liste des membres</h2><p class="page-subtitle" style="margin-top:5px">Administratrice : ${escapeHtml(currentUser.name)}</p></div><span class="status">${group.members.length} inscrits</span></div>
+          <label class="search member-search">${icon("search")}<input type="search" data-search-members placeholder="Rechercher un membre..." aria-label="Rechercher un membre" value="${escapeHtml(state.memberSearch)}"></label>
+          <div class="member-list">${members.map(({ name, index }) => {
+            const paid = paidNames.has(name);
+            const canRemove = name !== currentUser.name && !groupHistory(group).some((entry) => entry.member === name) && name !== group.nextMember;
+            return `<div class="managed-member"><div class="avatar">${escapeHtml(initials(name))}</div><div class="managed-member-name"><strong>${escapeHtml(name)}</strong><small>${name === currentUser.name ? "Administratrice" : group.memberContacts?.[name] ? escapeHtml(group.memberContacts[name]) : order.indexOf(name) >= 0 ? `Tour ${((group.cycle - 1 + order.indexOf(name)) % Math.max(1, group.totalCycles)) + 1}` : "Membre"}</small></div><span class="status ${paid ? "" : "pending"}">${paid ? "Cotisation reçue" : "En attente"}</span>${canRemove ? `<button class="icon-button remove-member" data-remove-member="${index}" aria-label="Retirer ${escapeHtml(name)}" title="Retirer du groupe">${icon("close")}</button>` : `<span class="member-protected" title="Membre déjà engagé">${icon("shield")}</span>`}</div>`;
+          }).join("") || `<div class="empty-state">Aucun membre ne correspond à votre recherche.</div>`}</div>
+        </section>
+        <section class="card panel invite-panel"><span class="stat-icon">${icon("plus")}</span><h2>Ajouter un membre</h2><p>Ajoutez un participant à la liste et à l’ordre des tours de cette tontine.</p><form id="member-form" novalidate><div class="field"><label for="new-member-name">Nom du membre</label><input id="new-member-name" name="name" required maxlength="80" placeholder="Ex. Amina Foko"></div><div class="field"><label for="new-member-phone">Téléphone <span>(facultatif)</span></label><input id="new-member-phone" name="phone" inputmode="tel" placeholder="+237 6XX XX XX XX"></div><p class="form-error" id="form-error" role="alert"></p><button class="button button-primary" type="submit">${icon("plus")} Ajouter au groupe</button></form>
+          <div class="invite-note">${icon("help")} Cette démo ajoute directement le membre. L’envoi d’invitations par SMS n’est pas connecté.</div>
+        </section>
+      </div>`;
+  }
+
+  function cyclesPage() {
+    const group = selectedGroup();
+    if (!group) return tontinesPage();
+    const order = state.orderDraft.length ? state.orderDraft : getRotationOrder(group);
+    const cyclesRemaining = Math.max(0, group.totalCycles - group.cycle + 1);
+    const cycleRows = order.slice(0, cyclesRemaining).map((member, index) => {
+      const date = addFrequency(group.nextDate, group.frequency || "Chaque mois", index);
+      const cycle = group.cycle + index;
+      const [label, statusClass] = statusForDate(date);
+      return `<div class="cycle-row"><div class="cycle-number">${cycle.toString().padStart(2, "0")}</div><div class="cycle-member"><div class="avatar">${escapeHtml(initials(member))}</div><div><strong>${escapeHtml(member)}</strong><small>${index === 0 ? "Prochain bénéficiaire" : `Bénéficiaire · tour ${cycle}`}</small></div></div><div class="cycle-date">${formatDate(date, { day: "numeric", month: "short", year: "numeric" })}</div><span class="status ${index === 0 ? "pending" : statusClass}">${index === 0 ? "Prochain tour" : label}</span></div>`;
+    }).join("");
+    const editableOrder = order.map((member, index) => `<div class="order-row"><span class="order-position">${index + 1}</span><div class="avatar">${escapeHtml(initials(member))}</div><strong>${escapeHtml(member)}</strong>${index === 0 ? `<span class="status pending">Prochain tour</span>` : ""}<div class="order-controls"><button class="icon-button" data-order-move="${index}" data-direction="-1" aria-label="Monter ${escapeHtml(member)}" ${index === 0 ? "disabled" : ""}>${icon("arrow", "rotate-up")}</button><button class="icon-button" data-order-move="${index}" data-direction="1" aria-label="Descendre ${escapeHtml(member)}" ${index === order.length - 1 ? "disabled" : ""}>${icon("arrow", "rotate-down")}</button></div></div>`).join("");
+    return `${heading(`Groupe · ${escapeHtml(group.name)}`, "Tours et ordre de passage", "Visualisez les bénéficiaires à venir et ajustez leur ordre.", `<button class="button button-secondary" data-action="back-to-group">${icon("back")} Retour au groupe</button>`)}
+      <div class="cycle-overview"><div class="card cycle-current"><span class="stat-icon">${icon("clock")}</span><div><small>Tour en cours</small><strong>${Math.min(group.cycle, group.totalCycles)} <span>/ ${group.totalCycles}</span></strong></div><span class="status pending">${group.paid} / ${group.members.length} cotisations</span></div><div class="card cycle-current"><span class="stat-icon">${icon("calendar")}</span><div><small>Prochaine date</small><strong>${formatDate(group.nextDate, { day: "numeric", month: "long" })}</strong></div><span class="page-subtitle">${escapeHtml(group.frequency || "Chaque mois")}</span></div></div>
+      <div class="cycles-layout"><section class="card panel"><div class="panel-heading"><div><h2>Prochains bénéficiaires</h2><p class="page-subtitle" style="margin-top:5px">L’ordre actuel, à partir du prochain tour</p></div><span class="status">${cyclesRemaining} tours restants</span></div><div class="cycle-list">${cycleRows || `<div class="empty-state">Tous les tours de cette tontine sont terminés.</div>`}</div></section>
+      <section class="card panel"><div class="panel-heading"><div><h2>Ordre de passage</h2><p class="page-subtitle" style="margin-top:5px">Utilisez les flèches pour réorganiser la liste.</p></div></div><div class="order-list">${editableOrder}</div><p class="form-error" id="order-error" role="alert"></p><button class="button button-primary order-save" data-action="save-order">${icon("check")} Enregistrer l’ordre</button></section></div>`;
+  }
+
+  function analyticsPage() {
+    const groups = state.analyticsGroup === "all" ? state.groups : state.groups.filter((group) => group.id === state.analyticsGroup);
+    const entries = groups.flatMap((group) => groupHistory(group).map((entry) => ({ ...entry, group })));
+    const total = entries.reduce((sum, entry) => sum + Number(entry.amount), 0);
+    const memberCount = groups.reduce((sum, group) => sum + group.members.length, 0);
+    const groupTotals = groups.map((group) => ({ group, total: groupHistory(group).reduce((sum, entry) => sum + Number(entry.amount), 0) }))
+      .sort((a, b) => b.total - a.total);
+    const weeks = Array.from({ length: 6 }, (_, index) => {
+      const end = new Date(today);
+      end.setDate(end.getDate() - (5 - index) * 7);
+      const start = new Date(end);
+      start.setDate(start.getDate() - 6);
+      const amount = entries.filter((entry) => {
+        const date = new Date(`${entry.date}T12:00:00`);
+        return date >= start && date <= end;
+      }).reduce((sum, entry) => sum + Number(entry.amount), 0);
+      return { start, amount };
+    });
+    const maxWeek = Math.max(1, ...weeks.map((week) => week.amount));
+    const distribution = groupTotals.map(({ group, total: amount }) => `<div class="analytics-group"><div class="analytics-group-top"><span class="group-label">${groupIcon(group)}<strong>${escapeHtml(group.name)}</strong></span><b>${money(amount)}</b></div><div class="progress"><span style="width:${total ? Math.round(amount / total * 100) : 0}%"></span></div><small>${total ? Math.round(amount / total * 100) : 0}% de l’épargne enregistrée</small></div>`).join("");
+    return `${heading("Vue d’ensemble de l’épargne", "Statistiques et rapports", "Mesurez les cotisations enregistrées dans vos tontines.", `<button class="button button-secondary" data-action="export-history">Exporter le rapport CSV</button>`)}
+      <div class="toolbar"><span class="page-subtitle">Périmètre du rapport</span><select class="filter-select" data-analytics-group aria-label="Filtrer les statistiques"><option value="all" ${state.analyticsGroup === "all" ? "selected" : ""}>Toutes les tontines</option>${state.groups.map((group) => `<option value="${escapeHtml(group.id)}" ${state.analyticsGroup === group.id ? "selected" : ""}>${escapeHtml(group.name)}</option>`).join("")}</select></div>
+      <div class="stats-grid analytics-stats"><article class="card stat-card"><div class="stat-top"><span>Total des cotisations</span><span class="stat-icon">${icon("wallet")}</span></div><p class="stat-value">${money(total)}</p><p class="stat-foot">${entries.length} versements enregistrés</p></article><article class="card stat-card"><div class="stat-top"><span>Groupes suivis</span><span class="stat-icon">${icon("users")}</span></div><p class="stat-value">${groups.length}</p><p class="stat-foot">sur ${state.groups.length} tontines</p></article><article class="card stat-card"><div class="stat-top"><span>Membres cumulés</span><span class="stat-icon">${icon("user")}</span></div><p class="stat-value">${memberCount}</p><p class="stat-foot">dans les groupes sélectionnés</p></article><article class="card stat-card"><div class="stat-top"><span>Cotisation moyenne</span><span class="stat-icon">${icon("trend")}</span></div><p class="stat-value">${money(entries.length ? Math.round(total / entries.length) : 0)}</p><p class="stat-foot">par versement enregistré</p></article></div>
+      <div class="analytics-layout"><section class="card panel"><div class="panel-heading"><div><h2>Activité des 6 dernières semaines</h2><p class="page-subtitle" style="margin-top:5px">Montant des versements confirmés</p></div></div><div class="weekly-chart" role="img" aria-label="Graphique des cotisations enregistrées par semaine">${weeks.map((week) => `<div class="week-column"><span class="week-amount">${week.amount ? money(week.amount) : "—"}</span><div class="week-bar-wrap"><div class="week-bar" style="height:${week.amount ? Math.max(5, Math.round(week.amount / maxWeek * 100)) : 2}%"></div></div><small>${new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "short" }).format(week.start)}</small></div>`).join("")}</div></section>
+      <section class="card panel"><div class="panel-heading"><div><h2>Répartition par tontine</h2><p class="page-subtitle" style="margin-top:5px">Cumul des versements connus</p></div></div><div class="analytics-groups">${distribution || `<div class="empty-state">Aucune donnée disponible.</div>`}</div></section></div>
+      <section class="card panel section-gap"><div class="panel-heading"><div><h2>Résumé des groupes</h2><p class="page-subtitle" style="margin-top:5px">Progression et contributions enregistrées</p></div></div><div class="table-wrap"><table><thead><tr><th>TONTINE</th><th>MEMBRES</th><th>TOUR EN COURS</th><th>COTISATIONS</th><th>TOTAL ENREGISTRÉ</th></tr></thead><tbody>${groups.map((group) => `<tr><td><strong>${escapeHtml(group.name)}</strong></td><td>${group.members.length}</td><td>${Math.min(group.cycle, group.totalCycles)} / ${group.totalCycles}</td><td>${groupHistory(group).length}</td><td><strong>${money(groupHistory(group).reduce((sum, entry) => sum + Number(entry.amount), 0))}</strong></td></tr>`).join("") || `<tr><td colspan="5">Aucune tontine à afficher.</td></tr>`}</tbody></table></div></section>`;
   }
 
   function wizardPage() {
@@ -443,7 +552,7 @@
     else if (state.screen === "login") root.innerHTML = authPage();
     else if (state.screen === "forgotSent") root.innerHTML = passwordResetSentPage();
     else {
-      const titles = { home: "Accueil", tontines: "Mes tontines", deadlines: "Échéances", profile: "Profil", create: "Créer une tontine", detail: "Détails de la tontine", contribute: "Enregistrer une cotisation", history: "Historique", notifications: "Notifications", help: "Aide", editProfile: "Modifier le profil" };
+      const titles = { home: "Accueil", tontines: "Mes tontines", deadlines: "Échéances", profile: "Profil", create: "Créer une tontine", detail: "Détails de la tontine", contribute: "Enregistrer une cotisation", history: "Historique", notifications: "Notifications", help: "Aide", editProfile: "Modifier le profil", members: "Membres", cycles: "Tours", analytics: "Statistiques" };
       const body = {
         home: dashboard,
         tontines: tontinesPage,
@@ -456,6 +565,9 @@
         notifications: notificationsPage,
         help: helpPage,
         editProfile: editProfilePage,
+        members: membersPage,
+        cycles: cyclesPage,
+        analytics: analyticsPage,
       }[state.screen]?.() || dashboard();
       root.innerHTML = appLayout(body, titles[state.screen] || "Accueil");
     }
@@ -492,10 +604,25 @@
       state.groupFilter = event.target.value;
       render();
     });
+    root.querySelector("[data-search-members]")?.addEventListener("input", (event) => {
+      const position = event.target.selectionStart;
+      state.memberSearch = event.target.value;
+      render();
+      const input = root.querySelector("[data-search-members]");
+      input.focus();
+      input.setSelectionRange(position, position);
+    });
+    root.querySelector("[data-analytics-group]")?.addEventListener("change", (event) => {
+      state.analyticsGroup = event.target.value;
+      render();
+    });
+    root.querySelectorAll("[data-order-move]").forEach((button) => button.addEventListener("click", () => moveOrderMember(button)));
+    root.querySelectorAll("[data-remove-member]").forEach((button) => button.addEventListener("click", () => removeGroupMember(button)));
     root.querySelector("#wizard-form")?.addEventListener("submit", handleWizardSubmit);
     root.querySelector("#contribution-form")?.addEventListener("submit", handleContributionSubmit);
     root.querySelector("#auth-form")?.addEventListener("submit", handleAuthSubmit);
     root.querySelector("#profile-form")?.addEventListener("submit", handleProfileSubmit);
+    root.querySelector("#member-form")?.addEventListener("submit", handleMemberSubmit);
   }
 
   function handleAction(action, button) {
@@ -503,10 +630,15 @@
     if (action === "contribute") { state.screen = "contribute"; render(); }
     if (action === "detail-back") { state.screen = "detail"; render(); }
     if (action === "history-back") { state.screen = "detail"; render(); }
+    if (action === "back-to-group") { state.screen = "detail"; state.memberSearch = ""; state.orderDraft = []; render(); }
+    if (action === "open-members") { state.screen = "members"; state.memberSearch = ""; render(); }
+    if (action === "open-cycles") { state.orderDraft = getRotationOrder(selectedGroup() || { members: [], nextMember: "" }); state.screen = "cycles"; render(); }
+    if (action === "open-analytics") { state.analyticsGroup = selectedGroup()?.id || "all"; state.screen = "analytics"; render(); }
+    if (action === "save-order") saveRotationOrder();
     if (action === "wizard-back") { collectWizardDraft(); state.wizardStep = Math.max(1, state.wizardStep - 1); render(); }
     if (action === "logout") { persistLogin(false); go("welcome"); }
     if (action === "notifications") { go("notifications"); }
-    if (action === "copy-invite") showToast("Lien d’invitation prêt à être partagé.");
+    if (action === "copy-invite") { state.screen = "members"; state.memberSearch = ""; render(); }
     if (action === "show-history") { state.screen = "history"; render(); }
     if (action === "export-history") exportHistory();
     if (action === "help" || action === "open-help") go("help");
@@ -548,6 +680,69 @@
     error.classList.add("visible");
   }
 
+  function handleMemberSubmit(event) {
+    event.preventDefault();
+    const group = selectedGroup();
+    if (!group) return showError("Tontine introuvable. Revenez à vos groupes et réessayez.");
+    const data = Object.fromEntries(new FormData(event.currentTarget).entries());
+    const name = String(data.name || "").trim();
+    if (!name) return showError("Saisissez le nom du nouveau membre.");
+    if (group.members.length >= 50) return showError("Une tontine ne peut pas dépasser 50 membres.");
+    if (group.members.some((member) => member.toLocaleLowerCase() === name.toLocaleLowerCase())) return showError("Ce membre figure déjà dans la tontine.");
+    group.members.push(name);
+    group.memberContacts = { ...(group.memberContacts || {}), ...(String(data.phone || "").trim() ? { [name]: String(data.phone).trim() } : {}) };
+    group.order = getRotationOrder(group);
+    group.totalCycles = Math.max(group.totalCycles, group.members.length);
+    state.orderDraft = [];
+    persistGroups();
+    render();
+    showToast(`${name} a été ajouté à la tontine.`);
+  }
+
+  function removeGroupMember(button) {
+    const group = selectedGroup();
+    if (!group) return;
+    const index = Number(button.dataset.removeMember);
+    const name = group.members[index];
+    if (!name || name === currentUser.name) return showToast("L’administratrice ne peut pas être retirée du groupe.");
+    if (name === group.nextMember || groupHistory(group).some((entry) => entry.member === name)) {
+      return showToast("Ce membre a déjà un engagement dans la tontine et ne peut pas être retiré.");
+    }
+    group.members.splice(index, 1);
+    group.order = getRotationOrder(group).filter((member) => member !== name);
+    group.totalCycles = Math.max(group.cycle, group.members.length);
+    group.paid = new Set(groupHistory(group).filter((entry) => entry.cycle === group.cycle).map((entry) => entry.member)).size;
+    persistGroups();
+    render();
+    showToast(`${name} a été retiré de la tontine.`);
+  }
+
+  function moveOrderMember(button) {
+    const index = Number(button.dataset.orderMove);
+    const target = index + Number(button.dataset.direction);
+    if (target < 0 || target >= state.orderDraft.length) return;
+    [state.orderDraft[index], state.orderDraft[target]] = [state.orderDraft[target], state.orderDraft[index]];
+    render();
+  }
+
+  function saveRotationOrder() {
+    const group = selectedGroup();
+    const error = root.querySelector("#order-error");
+    if (!group || state.orderDraft.length !== group.members.length || new Set(state.orderDraft).size !== group.members.length) {
+      if (error) {
+        error.textContent = "L’ordre doit inclure chaque membre une seule fois.";
+        error.classList.add("visible");
+      }
+      return;
+    }
+    group.order = [...state.orderDraft];
+    group.nextMember = group.order[0];
+    persistGroups();
+    state.orderDraft = [];
+    render();
+    showToast("L’ordre de passage a été enregistré.");
+  }
+
   function collectWizardDraft() {
     const form = root.querySelector("#wizard-form");
     if (!form) return;
@@ -575,11 +770,13 @@
       kind: state.draft.kind || "Entre amis",
       contribution: Number(state.draft.amount),
       members,
+      order: [...members.slice(1), members[0]],
       nextDate: state.draft.startDate || dateIn(7),
       nextMember: members[1] || currentUser.name,
       cycle: 1,
       paid: 0,
-      totalCycles: Number(state.draft.totalMembers) || 6,
+      totalCycles: members.length,
+      plannedMembers: Number(state.draft.totalMembers) || members.length,
       frequency: state.draft.frequency || "Chaque mois",
       description: String(state.draft.description || "").trim(),
       color: ["", "gold", "rose"][state.groups.length % 3],
@@ -605,12 +802,24 @@
     if (!Number.isFinite(amount) || amount <= 0) return showError("Saisissez un montant valide supérieur à zéro.");
     if (!group.members.includes(data.member)) return showError("Sélectionnez un membre de cette tontine.");
     if (!data.date || data.date > dateIn(0)) return showError("La date du versement ne peut pas être dans le futur.");
+    if (groupHistory(group).some((entry) => entry.member === data.member && entry.cycle === group.cycle)) return showError("Une cotisation est déjà enregistrée pour ce membre et ce tour.");
     group.history.unshift({ member: data.member, amount, date: data.date, cycle: group.cycle, note: String(data.note || "").trim() || `Cotisation du cycle ${group.cycle}` });
     group.paid = new Set(group.history.filter((entry) => entry.cycle === group.cycle).map((entry) => entry.member)).size;
+    const completedCycle = group.paid === group.members.length;
+    if (completedCycle && group.cycle < group.totalCycles) {
+      const nextOrder = getRotationOrder(group);
+      group.order = [...nextOrder.slice(1), nextOrder[0]];
+      group.cycle += 1;
+      group.paid = 0;
+      group.nextMember = group.order[0];
+      group.nextDate = addFrequency(group.nextDate, group.frequency || "Chaque mois");
+    } else if (completedCycle) {
+      group.cycle = group.totalCycles + 1;
+    }
     persistGroups();
     state.screen = "detail";
     render();
-    showToast("Cotisation ajoutée à l’historique.");
+    showToast(completedCycle ? (isGroupComplete(group) ? "Dernier tour terminé : tontine achevée." : "Tour terminé. Le bénéficiaire suivant a été planifié.") : "Cotisation ajoutée à l’historique.");
   }
 
   function handleProfileSubmit(event) {
@@ -630,7 +839,10 @@
   }
 
   function exportHistory() {
-    const rows = [["Groupe", "Membre", "Date", "Description", "Montant FCFA"], ...state.groups.flatMap((group) => group.history.map((entry) => [group.name, entry.member, entry.date, entry.note || "Cotisation", entry.amount]))];
+    const groups = state.screen === "analytics" && state.analyticsGroup !== "all"
+      ? state.groups.filter((group) => group.id === state.analyticsGroup)
+      : state.groups;
+    const rows = [["Groupe", "Membre", "Date", "Description", "Montant FCFA"], ...groups.flatMap((group) => groupHistory(group).map((entry) => [group.name, entry.member, entry.date, entry.note || "Cotisation", entry.amount]))];
     const csv = `\uFEFF${rows.map((row) => row.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(";")).join("\r\n")}`;
     const link = document.createElement("a");
     link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
